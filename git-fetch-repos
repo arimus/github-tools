@@ -1,6 +1,6 @@
 #!/bin/bash
 # The script clones all repositories of an GitHub organization.
- 
+
 # the github organization to fetch all repositories for
 GITHUB_ORGANIZATION=${GITHUB_ORGANIZATION:=""}
 GITHUB_USER=${GITHUB_USER:=""}
@@ -34,8 +34,8 @@ fi
 
 # the git clone cmd used for cloning each repository
 # the parameter recursive is used to clone submodules, too.
-GIT_CLONE_CMD="git clone"
-GIT_PULL_CMD="git pull"
+GIT_CLONE_CMD="git clone -q"
+GIT_PULL_CMD="git pull -q"
 GIT_CONFIG_REBASE_CMD="git config branch.autosetuprebase always"
 GIT_CONFIG_REBASE_MASTER_CMD="git config branch.master.rebase true"
 
@@ -48,8 +48,8 @@ if [ ! -d ${GITHUB_CHECKOUT_DIR} ]; then
     exit 1;
 else
     cd ${GITHUB_CHECKOUT_DIR}
-    if [ "$?" != "0" ]; then echo "Failed to change directory to ${GITHUB_CHECKOUT_DIR}"; exit 1; fi 
-     
+    if [ "$?" != "0" ]; then echo "Failed to change directory to ${GITHUB_CHECKOUT_DIR}"; exit 1; fi
+
     # fetch repository list via github api
     # grep fetches the json object key ssh_url, which contains the ssh url for the repository
     PAGE=1;
@@ -62,42 +62,52 @@ else
     else
       BASE_URL="https://api.github.com/orgs/${GITHUB_ORGANIZATION}/repos"
     fi
-    curl -o "${TMPFILE}" -u "${GITHUB_USER}:${GITHUB_PASS}" --silent --show-error "${BASE_URL}?type=all&page=${PAGE}&per_page=100" -q
-    if [ "$DEBUGGING" == "1" ]; then
-        cat $TMPFILE;
-    fi
-    REPOLIST=`cat ${TMPFILE} | grep "\"ssh_url\"" | awk -F': "' '{print $2}' | sed -e 's/",//g'`
-    rm -f $TMPFILE
 
-    while [ "$REPOLIST" != "" ]; do
-        # loop over all repository urls and execute clone
-        for REPO in $REPOLIST; do
-            # git@github.com:organization/reponame.git
-            REPONAME=`echo $REPO | awk '{split($0, a, "/"); split(a[2], b, "."); print b[1];}'`;
-    
+    MORE_TO_READ="1"
+    while [ "$MORE_TO_READ" == "1" ]
+    do
+        MORE_TO_READ="0"
+
+        curl -o "${TMPFILE}" -u "${GITHUB_USER}:${GITHUB_PASS}" --silent --show-error "${BASE_URL}?type=all&page=${PAGE}&per_page=100" -q
+        if [ "$DEBUGGING" == "1" ]; then
+            cat $TMPFILE;
+        fi
+
+        while read reponame repo archived
+        do
+            MORE_TO_READ="1"
+
             if [ "$1" == "--list" ]; then
-                echo $REPO
+                if [ "$archived" == "true" ]; then
+                    echo "$reponame $repo (archived)"
+                else
+                    echo "$reponame $repo"
+                fi
                 continue;
             fi
-    
-    
-            if [ -d $REPONAME ]; then
-                echo "updating ${REPONAME}"
-                GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${REPONAME}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${REPONAME}/.git" ${GIT_PULL_CMD}
+
+            if [ "$archived" == "true" ]; then
+                if [ -d $reponame ]; then
+                    echo "WARNING: encountered archived repository ${reponame}"
+                fi
             else
-                echo "cloning ${REPONAME}"
-                ${GIT_CLONE_CMD} ${REPO} ${REPONAME}
+                if [ -d $reponame ]; then
+                    echo "updating ${reponame}"
+                    GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${reponame}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${reponame}/.git" ${GIT_PULL_CMD}
+                else
+                    echo "cloning ${reponame}"
+                    ${GIT_CLONE_CMD} ${repo} ${reponame}
+                fi
+
+                # run git commands after checkout/update
+                GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${reponame}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${reponame}/.git" ${GIT_CONFIG_REBASE_CMD}
+                GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${reponame}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${reponame}/.git" ${GIT_CONFIG_REBASE_MASTER_CMD}
+                if [ "$GITHUB_USER_EMAIL" != "" ]; then
+                    GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${reponame}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${reponame}/.git" git config user.email $GITHUB_USER_EMAIL
+                fi
             fi
-    
-            # run git commands after checkout/update
-            GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${REPONAME}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${REPONAME}/.git" ${GIT_CONFIG_REBASE_CMD}
-            GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${REPONAME}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${REPONAME}/.git" ${GIT_CONFIG_REBASE_MASTER_CMD}
-            if [ "$GITHUB_USER_EMAIL" != "" ]; then
-                GIT_WORK_TREE="${GITHUB_CHECKOUT_DIR}/${REPONAME}" GIT_DIR="${GITHUB_CHECKOUT_DIR}/${REPONAME}/.git" git config user.email $GITHUB_USER_EMAIL
-            fi
-        done
+        done < <(cat $TMPFILE | jq -r '.[] | [.name, .ssh_url, .archived] | @tsv')
 
         let PAGE=PAGE+1
-        REPOLIST=`curl -u "${GITHUB_USER}:${GITHUB_PASS}" --silent "${BASE_URL}?type=all&page=$PAGE&per_page=100" -q | grep "\"ssh_url\"" | awk -F': "' '{print $2}' | sed -e 's/",//g'`
     done
 fi
